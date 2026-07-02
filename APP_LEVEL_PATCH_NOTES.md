@@ -25,3 +25,13 @@ Internal action cards now use normal HTTPS marker URLs to avoid Android TV/Cloud
 ## v2.5 behavior
 
 The plugin now does a best-effort read of CloudStream's local Favorites list via internal DataStoreHelper APIs and includes entries from the normal Twitch provider in the custom `Live Now` row. This is read-only and does not mutate CloudStream's existing favorites.
+
+
+## v2.6 notes
+
+This plugin now requests CloudStream home/library refresh events after plugin Add/Remove actions and uses ResumeWatchingResult-style cards in Live Now as a best-effort way to start playback on first click. Both are internal CloudStream behaviors and may require app-side patches if future builds change them.
+
+
+## v2.7 note
+
+The provider no longer exposes a Help action card. Empty Live Now states are intentionally empty so TV focus does not get stuck on a Help page.

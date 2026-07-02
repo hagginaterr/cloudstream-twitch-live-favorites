@@ -1,4 +1,4 @@
-# Twitch Live Favorites v2.5 for CloudStream
+# Twitch Live Favorites v2.7 for CloudStream
 
 This is a separate CloudStream provider named **Twitch Live Favorites**. It is designed to coexist with the normal Twitch provider.
 
@@ -8,7 +8,9 @@ This is a separate CloudStream provider named **Twitch Live Favorites**. It is d
 - Own saved favorites list stored locally by the plugin
 - Search-to-add flow from inside CloudStream
 - One home row only: `Live Now`
-- `Live Now` only shows saved favorite streamers while they are currently live
+- `Live Now` only shows saved/imported favorite streamers while they are currently live
+- Best-effort home/library refresh request after plugin Add/Remove actions
+- Experimental direct-play cards in `Live Now`, so a first click should start playback on most builds
 - Offline saved favorites remain saved but stay hidden from `Live Now` until they go live
 - To remove a saved streamer, search/open that streamer and use the `[Remove]` card
 
@@ -23,18 +25,21 @@ This is a separate CloudStream provider named **Twitch Live Favorites**. It is d
 
 ## Important behavior notes
 
-This plugin does **not** read CloudStream's built-in Library/Favorites list. It maintains its own saved Twitch-channel list so the workflow can work fully inside the provider without patching the CloudStream app.
-
-`Live Now` is intentionally live-only. Adding a streamer saves them to the plugin's internal list, but they will only be visible on the home page while TwitchTracker reports them as live.
+`Live Now` is intentionally live-only. The row is built from this plugin's saved list plus a read-only import of existing CloudStream favorites from the normal `Twitch` provider. Offline saved/imported streamers stay hidden until TwitchTracker reports them as live.
 
 Because CloudStream provider cards cannot create true custom buttons, add/remove actions are implemented as selectable cards. Opening an add/remove card performs the action and shows a confirmation page.
+
+After plugin Add/Remove actions, v2.7 asks CloudStream to refresh the home/library UI. That is a best-effort internal refresh request, not a real background timer. If you add/remove a favorite through the normal Twitch plugin instead of this custom plugin, you may still need to refresh or reload the `Twitch Live Favorites` home page.
+
+The `Live Now` row uses experimental direct-play cards. On CloudStream builds that support the internal Resume Watching click path, clicking a live streamer should start playback immediately. If your build still opens the detail page, that part requires an app-side CloudStream change.
 
 ## Recent fixes
 
 - v2.1 removed global Twitch extractor registration so the custom plugin should not interfere with the normal Twitch plugin.
 - v2.2 replaced `getContext()` storage with CloudStream `getKey` / `setKey` storage to avoid Android TV runtime crashes.
 - v2.3 changed internal add/remove URLs to normal HTTPS action URLs so Android TV passes them back to the provider correctly.
-- v2.5 simplifies the home page to one row: `Live Now`.
+- v2.5 imported existing normal Twitch CloudStream favorites into `Live Now` in read-only mode.
+- v2.7 requests a UI refresh after Add/Remove and makes `Live Now` cards direct-play on supported CloudStream builds.
 
 ## Build with GitHub Actions
 
@@ -82,8 +87,16 @@ Copy the built `.cs3` file to:
 Then fully close and reopen CloudStream. If CloudStream cannot see local plugin files, grant it All Files Access in Android settings.
 
 
-## v2.5 note: existing CloudStream Twitch favorites
+## v2.7 note: existing CloudStream Twitch favorites
 
 This build reads CloudStream's existing local Favorites list in read-only mode and automatically includes entries from the normal `Twitch` provider in the `Live Now` row. It does not modify or delete CloudStream's normal favorites. The visible `Live Now` row still only shows saved/imported streamers while they are currently live.
 
 The `[Remove]` card only removes streamers saved directly by this custom plugin. If a streamer is still in CloudStream's normal Twitch favorites, remove it from the normal CloudStream Favorites/Library as well if you do not want it to appear in `Live Now`.
+
+
+## v2.7 update
+
+- Removes the clickable Help/empty-state card completely.
+- The Home page now only shows the `Live Now` row with live saved streamers.
+- If nobody is live, the row is empty instead of opening a confusing Help page.
+- Keeps v2.6's best-effort refresh event after Add/Remove and experimental direct-play Live Now cards.

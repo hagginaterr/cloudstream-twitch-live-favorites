@@ -1,8 +1,8 @@
 // Use an integer for version numbers
-version = 6
+version = 7
 
 cloudstream {
-    description = "Twitch Live Favorites: one Live Now row, search-to-add, and automatic read-only inclusion of existing CloudStream Twitch favorites."
+    description = "Twitch Live Favorites: Live Now only, existing CloudStream Twitch favorites import, no Help placeholder page, search-to-add, and experimental direct play."
     authors = listOf("CranberrySoup", "Custom live-favorites patch")
 
     /**
