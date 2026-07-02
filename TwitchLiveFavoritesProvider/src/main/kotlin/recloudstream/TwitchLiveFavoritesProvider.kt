@@ -1,7 +1,7 @@
 package recloudstream.twitchlivefavorites
 
-import android.content.Context
-import com.lagradost.api.getContext
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LiveSearchResponse
@@ -17,11 +17,9 @@ import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newLiveSearchResponse
 import com.lagradost.cloudstream3.newLiveStreamLoadResponse
-import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
-import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Element
 import java.lang.RuntimeException
@@ -46,8 +44,8 @@ class TwitchLiveFavoritesProvider : MainAPI() {
     private val removePrefix = "$actionBase/remove/"
     private val helpUrl = "$actionBase/help"
 
-    private val prefsName = "twitch_live_favorites_provider_v2"
-    private val channelsKey = "favorite_channels"
+    private val prefsFolder = "twitch_live_favorites_provider_v2"
+    private val channelsKey = "$prefsFolder/favorite_channels"
 
     override val mainPage = mainPageOf(
         "$actionBase/live" to liveFavoritesNowName,
@@ -139,12 +137,8 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         val description: String?,
     )
 
-    private fun prefs() = (getContext() as? Context)
-        ?.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-
     private fun getSavedFavoriteChannels(): List<String> {
-        return prefs()
-            ?.getString(channelsKey, "")
+        return getKey<String>(channelsKey, "")
             .orEmpty()
             .split('|')
             .map { normalizeChannel(it) }
@@ -159,7 +153,7 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             .distinct()
             .sorted()
             .joinToString("|")
-        prefs()?.edit()?.putString(channelsKey, normalized)?.apply()
+        setKey(channelsKey, normalized)
     }
 
     private fun isFavorite(channel: String): Boolean {
@@ -458,25 +452,32 @@ class TwitchLiveFavoritesProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         val normalizedQuery = normalizeChannel(query)
-        val document = app.get("$mainUrl/search", params = mapOf("q" to query), referer = mainUrl).document
-        val results = document.select("table.tops tr")
-            .mapNotNull { it.toChannelSummary() }
-            .distinctBy { it.channel }
-
-        val addActions = results
-            .filterNot { isFavorite(it.channel) }
-            .take(8)
-            .map { it.toAddCard() }
-
         val exactAddAction = if (normalizedQuery.isNotBlank() && !isFavorite(normalizedQuery)) {
             listOf(addCardForChannel(normalizedQuery))
         } else {
             emptyList()
         }
 
+        val results = runCatching {
+            val document = app.get("$mainUrl/search", params = mapOf("q" to query), referer = mainUrl).document
+            document.select("table.tops tr")
+                .mapNotNull { it.toChannelSummary() }
+                .distinctBy { it.channel }
+        }.getOrElse { emptyList() }
+
+        val addActions = results
+            .filterNot { isFavorite(it.channel) }
+            .take(8)
+            .map { it.toAddCard() }
+
         return (exactAddAction + addActions + results.map { it.toChannelCard() })
             .distinctBy { it.url }
     }
+
+    data class ApiResponse(
+        val success: Boolean,
+        val urls: Map<String, String>?,
+    )
 
     override suspend fun loadLinks(
         data: String,
@@ -485,40 +486,27 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         if (!data.startsWith("http", ignoreCase = true)) return false
-        return loadExtractor(data, subtitleCallback, callback)
-    }
 
-    class TwitchLiveFavoritesExtractor : ExtractorApi() {
-        override val mainUrl = "https://twitch.tv/"
-        override val name = "Twitch Live Favorites"
-        override val requiresReferer = false
+        val response = runCatching {
+            app.get("https://pwn.sh/tools/streamapi.py?url=$data").parsed<ApiResponse>()
+        }.getOrNull() ?: return false
 
-        data class ApiResponse(
-            val success: Boolean,
-            val urls: Map<String, String>?,
-        )
-
-        override suspend fun getUrl(
-            url: String,
-            referer: String?,
-            subtitleCallback: (SubtitleFile) -> Unit,
-            callback: (ExtractorLink) -> Unit,
-        ) {
-            val response = app.get("https://pwn.sh/tools/streamapi.py?url=$url").parsed<ApiResponse>()
-            response.urls?.forEach { (name, streamUrl) ->
-                val quality = getQualityFromName(name.substringBefore("p"))
-                callback.invoke(
-                    newExtractorLink(
-                        this.name,
-                        "${this.name} ${name.replace("${quality}p", "")}",
-                        streamUrl,
-                    ) {
-                        this.type = ExtractorLinkType.M3U8
-                        this.quality = quality
-                        this.referer = ""
-                    },
-                )
-            }
+        var found = false
+        response.urls?.forEach { (qualityName, streamUrl) ->
+            val quality = getQualityFromName(qualityName.substringBefore("p"))
+            callback.invoke(
+                newExtractorLink(
+                    name,
+                    "$name ${qualityName.replace("${quality}p", "")}",
+                    streamUrl,
+                ) {
+                    this.type = ExtractorLinkType.M3U8
+                    this.quality = quality
+                    this.referer = ""
+                },
+            )
+            found = true
         }
+        return found
     }
 }
