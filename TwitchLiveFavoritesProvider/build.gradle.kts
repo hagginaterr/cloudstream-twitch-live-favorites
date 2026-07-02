@@ -1,5 +1,5 @@
 // Use an integer for version numbers
-version = 9
+version = 10
 
 cloudstream {
     description = "Twitch Live Favorites: stable single Live Now row, existing Twitch favorites import, search-to-add, safer URL parsing, and safe empty-state card."
