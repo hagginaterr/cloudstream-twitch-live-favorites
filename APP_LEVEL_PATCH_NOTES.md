@@ -1,6 +1,15 @@
+# v2.11 Patch Notes
+
+Rollback-stable build based on v2.5. The only functional change is the Help-screen fix:
+
+- Removed the Help route/page.
+- Empty-state cards no longer open the Help page.
+- Clicking an empty-state card now fails fast with a message rather than navigating away.
+- Reverted later experimental changes, including direct-play cards and UI-refresh internals.
+
 # App-level patch notes
 
-This plugin avoids editing CloudStream app internals by storing its own live-favorites list with CloudStream key/value helpers and exposing add/remove actions as provider cards.
+This v2 plugin avoids editing CloudStream app internals by storing its own live-favorites list in Android SharedPreferences and exposing add/remove actions as provider cards.
 
 A true app-level implementation could still add deeper integration, such as:
 
@@ -25,18 +34,3 @@ Internal action cards now use normal HTTPS marker URLs to avoid Android TV/Cloud
 ## v2.5 behavior
 
 The plugin now does a best-effort read of CloudStream's local Favorites list via internal DataStoreHelper APIs and includes entries from the normal Twitch provider in the custom `Live Now` row. This is read-only and does not mutate CloudStream's existing favorites.
-
-
-## v2.6 notes
-
-This plugin requests CloudStream home/library refresh events after plugin Add/Remove actions. These are internal CloudStream behaviors and may require app-side patches if future builds change them.
-
-
-## v2.7 note
-
-The provider no longer exposes a Help action card. The provider no longer exposes a Help action card, so TV focus cannot get stuck on the Help page.
-
-
-## v2.9 note
-
-The experimental ResumeWatchingResult direct-play cards were reverted because they caused an empty/black Live Now row on some Android TV builds. v2.9 uses normal provider cards and a safe no-op empty-state card.

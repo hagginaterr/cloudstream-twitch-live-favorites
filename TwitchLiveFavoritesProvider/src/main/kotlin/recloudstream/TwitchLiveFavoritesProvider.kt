@@ -8,11 +8,11 @@ import com.lagradost.cloudstream3.LiveSearchResponse
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
-import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newLiveSearchResponse
@@ -35,16 +35,18 @@ class TwitchLiveFavoritesProvider : MainAPI() {
     override var sequentialMainPageDelay = 350L
 
     private val liveFavoritesNowName = "Live Now"
+    private val gamesName = "games"
     private val isHorizontal = true
 
     // Use normal HTTPS URLs for internal plugin actions. CloudStream may normalize or route
     // custom schemes such as cloudstream:// before they reach load(), which caused the older
-    // build to treat the Add/Remove cards as real TwitchTracker channel pages.
+    // build to treat the Help/Add cards as real TwitchTracker channel pages.
     private val actionMarker = "__twitch_live_favorites_action__"
     private val actionBase = "$mainUrl/$actionMarker"
     private val addPrefix = "$actionBase/add/"
     private val removePrefix = "$actionBase/remove/"
     private val noopPrefix = "$actionBase/noop/"
+
     private val prefsFolder = "twitch_live_favorites_provider_v2"
     private val channelsKey = "$prefsFolder/favorite_channels"
 
@@ -53,20 +55,30 @@ class TwitchLiveFavoritesProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // This provider intentionally exposes only one row: Live Now. Keeping the
-        // homepage path narrow avoids stale/hidden action pages showing up as rows.
-        val favorites = parseFavoriteChannels()
-        val liveFavorites = favorites.filter { it.isLive }
-        val cards = if (liveFavorites.isNotEmpty()) {
-            liveFavorites.map { it.toLiveNowCard() }
-        } else {
-            listOf(emptyLiveNowCard(hasNoSavedFavorites = favorites.isEmpty()))
+        return when (request.name) {
+            liveFavoritesNowName -> {
+                val favorites = parseFavoriteChannels()
+                val liveFavorites = favorites.filter { it.isLive }
+                singleHomeResponse(
+                    liveFavoritesNowName,
+                    if (liveFavorites.isEmpty()) {
+                        listOf(emptyLiveFavoritesCard(favorites.isEmpty()))
+                    } else {
+                        liveFavorites.map { it.toChannelCard(showOfflineLabel = false) }
+                    },
+                    hasNext = false,
+                )
+            }
+
+            gamesName -> newHomePageResponse(parseGames(), hasNext = false)
+
+            else -> {
+                val doc = app.get(request.data, params = mapOf("page" to page.toString())).document
+                val channels = doc.select("table#channels tr")
+                    .mapNotNull { element -> element.toChannelSummary()?.toChannelCard() }
+                singleHomeResponse(request.name, channels, hasNext = true)
+            }
         }
-        return singleHomeResponse(
-            liveFavoritesNowName,
-            cards,
-            hasNext = false,
-        )
     }
 
     private fun singleHomeResponse(
@@ -189,17 +201,6 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         return true
     }
 
-    /**
-     * Best-effort request for CloudStream to refresh the Home/Library UI after this
-     * plugin changes its own saved list. This is intentionally guarded because these
-     * are CloudStream internals, not part of the stable provider API.
-     */
-    private fun requestUiRefresh() {
-        runCatching { MainActivity.reloadHomeEvent(true) }
-        runCatching { MainActivity.reloadLibraryEvent(true) }
-        runCatching { MainActivity.bookmarksUpdatedEvent(true) }
-    }
-
     private suspend fun parseFavoriteChannels(): List<FavoriteChannel> {
         return getSavedFavoriteChannels()
             .map { channel -> fetchChannel(channel) ?: fallbackChannel(channel) }
@@ -256,60 +257,14 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             .removePrefix("@")
             .substringBefore("?")
             .substringBefore("#")
-            .trim()
-        if (trimmed.isBlank()) return ""
-
-        // Favorites imported from CloudStream may be saved as a bare username,
-        // a twitch.tv URL, or a TwitchTracker URL. Use the first path segment for
-        // URLs so links like twitch.tv/shroud/about still resolve to shroud.
-        val pathCandidate = when {
-            trimmed.contains("twitchtracker.com/", ignoreCase = true) ->
-                trimmed.substringAfter("twitchtracker.com/", "")
-            trimmed.contains("twitch.tv/", ignoreCase = true) ->
-                trimmed.substringAfter("twitch.tv/", "")
-            trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true) ->
-                trimmed.substringAfter("://", "").substringAfter("/", "")
-            else -> trimmed
-        }.trim('/')
-
-        val firstSegment = pathCandidate
-            .split('/')
-            .firstOrNull { it.isNotBlank() }
-            .orEmpty()
-            .removePrefix("@")
+            .trim('/')
+            .substringAfterLast("/")
             .lowercase()
-            .filter { it.isLetterOrDigit() || it == '_' }
 
-        val reserved = setOf(
-            actionMarker,
-            "directory",
-            "downloads",
-            "games",
-            "login",
-            "p",
-            "search",
-            "settings",
-            "signup",
-            "subscriptions",
-            "videos",
-        )
-        return firstSegment.takeIf { it.isNotBlank() && it !in reserved }.orEmpty()
+        return trimmed.filter { it.isLetterOrDigit() || it == '_' }
     }
 
     private fun twitchUrl(channel: String): String = "https://twitch.tv/${normalizeChannel(channel)}"
-
-    /**
-     * Stable Live Now card. Earlier builds tried using CloudStream's internal
-     * ResumeWatchingResult for one-click playback, but that rendered as an
-     * empty/black row on some Android TV builds. This normal provider card is
-     * reliable; opening it goes to the stream page where CloudStream can play it.
-     */
-    private fun FavoriteChannel.toLiveNowCard(): LiveSearchResponse {
-        return newLiveSearchResponse("[LIVE] $displayName", channel, TvType.Live, fix = false) {
-            posterUrl = image
-            lang = language
-        }
-    }
 
     private fun FavoriteChannel.toChannelCard(showOfflineLabel: Boolean): LiveSearchResponse {
         val displayTitle = when {
@@ -360,14 +315,25 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         }
     }
 
-    private fun emptyLiveNowCard(hasNoSavedFavorites: Boolean): LiveSearchResponse {
-        val title = if (hasNoSavedFavorites) {
-            "No favorites saved yet - search a streamer to add one"
+    private fun emptyFavoritesCard(): LiveSearchResponse {
+        return newLiveSearchResponse(
+            "No Live Favorites yet - search a streamer to add one",
+            "${noopPrefix}no-favorites",
+            TvType.Live,
+            fix = false,
+        ) {
+            lang = "Live Favorites"
+        }
+    }
+
+    private fun emptyLiveFavoritesCard(hasNoFavorites: Boolean): LiveSearchResponse {
+        val title = if (hasNoFavorites) {
+            "No Live Favorites yet - search a streamer to add one"
         } else {
             "No saved favorites are live right now"
         }
-        val reason = if (hasNoSavedFavorites) "no-favorites" else "none-live"
-        return newLiveSearchResponse(title, "$noopPrefix$reason", TvType.Live, fix = false) {
+        val reason = if (hasNoFavorites) "no-favorites" else "none-live"
+        return newLiveSearchResponse(title, "${noopPrefix}$reason", TvType.Live, fix = false) {
             lang = "Live Favorites"
         }
     }
@@ -389,12 +355,31 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         return ChannelSummary(channel, displayName, image, language)
     }
 
+    private suspend fun parseGames(): List<HomePageList> {
+        val doc = app.get("$mainUrl/games").document
+        return doc.select("div.ranked-item")
+            .take(5)
+            .mapNotNull { element ->
+                val game = element.select("div.ri-name > a")
+                val url = fixUrl(game.attr("href"))
+                val name = game.text()
+                val searchResponses = parseGame(url).ifEmpty { return@mapNotNull null }
+                HomePageList(name, searchResponses, isHorizontalImages = isHorizontal)
+            }
+    }
+
+    private suspend fun parseGame(url: String): List<LiveSearchResponse> {
+        val doc = app.get(url).document
+        return doc.select("td.cell-slot.sm")
+            .mapNotNull { element -> element.toChannelSummary()?.toChannelCard() }
+    }
+
     override suspend fun load(url: String): LoadResponse {
         val action = parseActionUrl(url)
         return when (action?.first) {
             "add" -> addFavoriteResponse(action.second)
             "remove" -> removeFavoriteResponse(action.second)
-            "noop" -> noLiveFavoritesResponse(action.second)
+            "noop", "help" -> throw RuntimeException(noopMessage(action.second))
             else -> channelLoadResponse(url)
         }
     }
@@ -419,24 +404,17 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         return action to value
     }
 
-    private suspend fun noLiveFavoritesResponse(reason: String): LoadResponse {
-        val hasNoFavorites = reason == "no-favorites"
-        val title = if (hasNoFavorites) "No favorites saved yet" else "No favorites are live right now"
-        val message = if (hasNoFavorites) {
-            "Search for a Twitch streamer and open the [Add] card to add them. Existing favorites from the normal Twitch provider are also imported automatically."
+    private fun noopMessage(reason: String): String {
+        return if (reason == "no-favorites") {
+            "No Live Favorites yet. Search a streamer to add one. Existing normal Twitch favorites are imported automatically."
         } else {
-            "Your saved/imported Twitch favorites are loaded, but none of them are currently live. Refresh this provider later to check again."
-        }
-        return newLiveStreamLoadResponse(title, "$actionBase/live", "$actionBase/live") {
-            plot = message
-            tags = listOf("Live Favorites")
+            "No saved/imported Twitch favorites are live right now. Refresh later to check again."
         }
     }
 
     private suspend fun addFavoriteResponse(channel: String): LoadResponse {
         val normalized = normalizeChannel(channel)
         val changed = addFavorite(normalized)
-        if (changed) requestUiRefresh()
         val info = fetchChannel(normalized) ?: fallbackChannel(normalized)
         val title = if (changed) {
             "Added ${info.displayName}"
@@ -454,13 +432,8 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             posterUrl = info.image
             backgroundPosterUrl = info.poster
             tags = listOf(if (info.isLive) "Live" else "Offline", "Saved")
-            val channelCard = if (info.isLive) {
-                info.toLiveNowCard()
-            } else {
-                info.toChannelCard(showOfflineLabel = true)
-            }
             recommendations = listOf(
-                channelCard,
+                info.toChannelCard(showOfflineLabel = true),
                 info.toRemoveCard(),
             )
         }
@@ -470,7 +443,6 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         val normalized = normalizeChannel(channel)
         val info = fetchChannel(normalized) ?: fallbackChannel(normalized)
         val changed = removeFavorite(normalized)
-        if (changed) requestUiRefresh()
         val title = if (changed) {
             "Removed ${info.displayName}"
         } else {
@@ -503,10 +475,10 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             info.language,
             info.rank?.let { "Rank: $it" },
         )
-        val action = when {
-            isPluginSavedFavorite(info.channel) -> info.toRemoveCard()
-            isFavorite(info.channel) -> info.toAddCard("Save ${info.displayName} inside Live Favorites")
-            else -> info.toAddCard()
+        val action = if (isPluginSavedFavorite(info.channel)) {
+            info.toRemoveCard()
+        } else {
+            info.toAddCard()
         }
         val streamUrl = twitchUrl(info.channel)
 
