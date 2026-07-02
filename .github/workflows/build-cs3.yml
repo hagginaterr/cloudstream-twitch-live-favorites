@@ -1,0 +1,36 @@
+name: Build CloudStream CS3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10'
+
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version 8.10
+
+      - name: Build plugin
+        run: ./gradlew TwitchLiveFavoritesProvider:make --stacktrace
+
+      - name: Upload CS3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TwitchLiveFavoritesProvider-cs3
+          path: '**/build/*.cs3'
