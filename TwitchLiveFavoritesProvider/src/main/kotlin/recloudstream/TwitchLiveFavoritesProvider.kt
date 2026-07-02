@@ -12,73 +12,71 @@ import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newLiveSearchResponse
 import com.lagradost.cloudstream3.newLiveStreamLoadResponse
+import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.utils.DataStoreHelper
-import org.jsoup.nodes.Element
-import java.lang.RuntimeException
+import java.net.URLDecoder
+import java.net.URLEncoder
 
-class TwitchLiveFavoritesProvider : MainAPI() {
-    override var mainUrl = "https://twitchtracker.com"
-    override var name = "Twitch Live Favorites"
+class TwitchApiLiveFavoritesProvider : MainAPI() {
+    override var mainUrl = "https://twitch.tv"
+    override var name = "Twitch Live Favorites API"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "uni"
     override val hasMainPage = true
     override var sequentialMainPage = true
-    override var sequentialMainPageDelay = 350L
+    override var sequentialMainPageDelay = 0L
 
     private val liveFavoritesNowName = "Live Now"
-    private val gamesName = "games"
     private val isHorizontal = true
 
-    // Use normal HTTPS URLs for internal plugin actions. CloudStream may normalize or route
-    // custom schemes such as cloudstream:// before they reach load(), which caused the older
-    // build to treat the Help/Add cards as real TwitchTracker channel pages.
-    private val actionMarker = "__twitch_live_favorites_action__"
+    private val actionMarker = "__twitch_live_favorites_api_v31_action__"
+    private val legacyActionMarker = "__twitch_live_favorites_action__"
     private val actionBase = "$mainUrl/$actionMarker"
     private val addPrefix = "$actionBase/add/"
     private val removePrefix = "$actionBase/remove/"
-    private val noopPrefix = "$actionBase/noop/"
+    private val statusPrefix = "$actionBase/status/"
 
     private val prefsFolder = "twitch_live_favorites_provider_v2"
     private val channelsKey = "$prefsFolder/favorite_channels"
+
+    private val helixBase = "https://api.twitch.tv/helix"
+    private val oauthTokenUrl = "https://id.twitch.tv/oauth2/token"
+    private val liveCacheTtlMs = 2 * 60 * 1000L
+
+    private var cachedAccessToken: String? = null
+    private var cachedAccessTokenExpiresAtMs: Long = 0L
+    private var cachedLiveKey: String = ""
+    private var cachedLiveExpiresAtMs: Long = 0L
+    private var cachedLiveFavorites: List<FavoriteChannel> = emptyList()
+    private var lastTwitchApiError: String? = null
 
     override val mainPage = mainPageOf(
         "$actionBase/live" to liveFavoritesNowName,
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        return when (request.name) {
-            liveFavoritesNowName -> {
-                val favorites = parseFavoriteChannels()
-                val liveFavorites = favorites.filter { it.isLive }
-                singleHomeResponse(
-                    liveFavoritesNowName,
-                    if (liveFavorites.isEmpty()) {
-                        listOf(emptyLiveFavoritesCard(favorites.isEmpty()))
-                    } else {
-                        liveFavorites.map { it.toChannelCard(showOfflineLabel = false) }
-                    },
-                    hasNext = false,
-                )
-            }
-
-            gamesName -> newHomePageResponse(parseGames(), hasNext = false)
-
+        val favorites = getSavedFavoriteChannels()
+        val items = when {
+            !hasTwitchCredentials() -> listOf(setupRequiredCard())
+            favorites.isEmpty() -> emptyList()
             else -> {
-                val doc = app.get(request.data, params = mapOf("page" to page.toString())).document
-                val channels = doc.select("table#channels tr")
-                    .mapNotNull { element -> element.toChannelSummary()?.toChannelCard() }
-                singleHomeResponse(request.name, channels, hasNext = true)
+                val liveFavorites = fetchLiveFavoriteChannels(favorites)
+                when {
+                    liveFavorites == null -> listOf(apiErrorCard(lastTwitchApiError.orEmpty()))
+                    liveFavorites.isNotEmpty() -> liveFavorites.map { it.toChannelCard(showOfflineLabel = false) }
+                    else -> emptyList()
+                }
             }
         }
+
+        return singleHomeResponse(liveFavoritesNowName, items, hasNext = false)
     }
 
     private fun singleHomeResponse(
@@ -97,6 +95,8 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         val displayName: String,
         val image: String? = null,
         val language: String? = null,
+        val isLive: Boolean = false,
+        val title: String? = null,
     )
 
     private data class FavoriteChannel(
@@ -108,6 +108,68 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         val language: String?,
         val rank: Int?,
         val description: String?,
+        val gameName: String? = null,
+        val viewerCount: Int? = null,
+    )
+
+    private data class TwitchTokenResponse(
+        val access_token: String = "",
+        val expires_in: Long = 0L,
+        val token_type: String = "",
+    )
+
+    private data class TwitchUsersResponse(
+        val data: List<TwitchUser> = emptyList(),
+    )
+
+    private data class TwitchUser(
+        val id: String = "",
+        val login: String = "",
+        val display_name: String = "",
+        val description: String = "",
+        val profile_image_url: String = "",
+        val offline_image_url: String = "",
+    )
+
+    private data class TwitchStreamsResponse(
+        val data: List<TwitchStream> = emptyList(),
+    )
+
+    private data class TwitchStream(
+        val id: String = "",
+        val user_id: String = "",
+        val user_login: String = "",
+        val user_name: String = "",
+        val game_id: String = "",
+        val game_name: String = "",
+        val type: String = "",
+        val title: String = "",
+        val viewer_count: Int = 0,
+        val started_at: String = "",
+        val language: String = "",
+        val thumbnail_url: String = "",
+    )
+
+    private data class TwitchSearchResponse(
+        val data: List<TwitchSearchChannel> = emptyList(),
+    )
+
+    private data class TwitchSearchChannel(
+        val broadcaster_language: String = "",
+        val broadcaster_login: String = "",
+        val display_name: String = "",
+        val game_id: String = "",
+        val game_name: String = "",
+        val id: String = "",
+        val is_live: Boolean = false,
+        val thumbnail_url: String = "",
+        val title: String = "",
+        val started_at: String = "",
+    )
+
+    private data class ApiResponse(
+        val success: Boolean = false,
+        val urls: Map<String, String>? = null,
     )
 
     /**
@@ -133,9 +195,10 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             DataStoreHelper.getAllFavorites()
                 .asSequence()
                 .filter { favorite ->
-                    favorite.apiName.equals("Twitch", ignoreCase = true) ||
-                        favorite.url.contains("twitch", ignoreCase = true) ||
-                        favorite.url.contains("twitchtracker", ignoreCase = true)
+                    val url = favorite.url.lowercase()
+                    val api = favorite.apiName.lowercase()
+                    (api == "twitch" || url.contains("twitch") || url.contains("twitchtracker")) &&
+                        !url.contains(actionMarker) && !url.contains(legacyActionMarker)
                 }
                 .mapNotNull { favorite ->
                     val fromUrl = normalizeChannel(favorite.url)
@@ -189,6 +252,7 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         val current = getPluginSavedFavoriteChannels()
         if (current.contains(normalized)) return false
         savePluginFavoriteChannels(current + normalized)
+        invalidateLiveCache()
         return true
     }
 
@@ -198,43 +262,222 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         val current = getPluginSavedFavoriteChannels()
         if (!current.contains(normalized)) return false
         savePluginFavoriteChannels(current.filterNot { it == normalized })
+        invalidateLiveCache()
         return true
     }
 
-    private suspend fun parseFavoriteChannels(): List<FavoriteChannel> {
-        return getSavedFavoriteChannels()
-            .map { channel -> fetchChannel(channel) ?: fallbackChannel(channel) }
-            .sortedWith(
-                compareByDescending<FavoriteChannel> { it.isLive }
-                    .thenBy { it.displayName.lowercase() },
-            )
+    private fun invalidateLiveCache() {
+        cachedLiveKey = ""
+        cachedLiveExpiresAtMs = 0L
+        cachedLiveFavorites = emptyList()
+    }
+
+    private fun hasTwitchCredentials(): Boolean {
+        return TwitchCredentials.CLIENT_ID.isNotBlank() && TwitchCredentials.CLIENT_SECRET.isNotBlank()
+    }
+
+    private suspend fun getAppAccessToken(): String? {
+        if (!hasTwitchCredentials()) {
+            lastTwitchApiError = "Twitch API credentials are missing."
+            return null
+        }
+
+        val now = System.currentTimeMillis()
+        cachedAccessToken?.let { token ->
+            if (now < cachedAccessTokenExpiresAtMs) return token
+        }
+
+        return runCatching {
+            val response = app.post(
+                oauthTokenUrl,
+                headers = mapOf("Content-Type" to "application/x-www-form-urlencoded"),
+                data = mapOf(
+                    "client_id" to TwitchCredentials.CLIENT_ID,
+                    "client_secret" to TwitchCredentials.CLIENT_SECRET,
+                    "grant_type" to "client_credentials",
+                ),
+            ).parsed<TwitchTokenResponse>()
+
+            val token = response.access_token.trim()
+            if (token.isBlank()) return@runCatching null
+            cachedAccessToken = token
+            cachedAccessTokenExpiresAtMs = now + maxOf(60L, response.expires_in - 60L) * 1000L
+            lastTwitchApiError = null
+            token
+        }.getOrElse { error ->
+            cachedAccessToken = null
+            cachedAccessTokenExpiresAtMs = 0L
+            lastTwitchApiError = "Could not get Twitch API token: ${error.message ?: error.javaClass.simpleName}"
+            null
+        }
+    }
+
+    private suspend inline fun <reified T : Any> twitchGet(url: String): T? {
+        val token = getAppAccessToken() ?: return null
+        val firstTry = runCatching { twitchGetWithToken<T>(url, token) }
+        firstTry.getOrNull()?.let { result ->
+            lastTwitchApiError = null
+            return result
+        }
+
+        // If the cached token was stale or revoked, clear it and try once more.
+        cachedAccessToken = null
+        cachedAccessTokenExpiresAtMs = 0L
+        val retryToken = getAppAccessToken() ?: return null
+        return runCatching { twitchGetWithToken<T>(url, retryToken) }
+            .onSuccess { lastTwitchApiError = null }
+            .getOrElse { error ->
+                cachedAccessToken = null
+                cachedAccessTokenExpiresAtMs = 0L
+                lastTwitchApiError = "Twitch API request failed: ${error.message ?: error.javaClass.simpleName}"
+                null
+            }
+    }
+
+    private suspend inline fun <reified T : Any> twitchGetWithToken(url: String, token: String): T {
+        return app.get(
+            url,
+            headers = mapOf(
+                "Authorization" to "Bearer $token",
+                "Client-Id" to TwitchCredentials.CLIENT_ID,
+            ),
+        ).parsed<T>()
+    }
+
+    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
+
+    private fun decode(value: String): String = runCatching {
+        URLDecoder.decode(value, "UTF-8")
+    }.getOrDefault(value)
+
+    private fun buildHelixUrl(
+        endpoint: String,
+        repeatedKey: String? = null,
+        repeatedValues: List<String> = emptyList(),
+        extra: Map<String, String> = emptyMap(),
+    ): String {
+        val parts = mutableListOf<String>()
+        extra.forEach { (key, value) -> parts.add("${encode(key)}=${encode(value)}") }
+        repeatedKey?.let { key ->
+            repeatedValues.forEach { value -> parts.add("${encode(key)}=${encode(value)}") }
+        }
+        return "$helixBase/$endpoint" + if (parts.isEmpty()) "" else "?${parts.joinToString("&")}"
+    }
+
+    private suspend fun fetchUsers(channels: List<String>): Map<String, TwitchUser> {
+        val normalized = channels
+            .map { normalizeChannel(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (normalized.isEmpty()) return emptyMap()
+
+        val users = mutableMapOf<String, TwitchUser>()
+        normalized.chunked(100).forEach { chunk ->
+            val response = twitchGet<TwitchUsersResponse>(
+                buildHelixUrl("users", repeatedKey = "login", repeatedValues = chunk),
+            ) ?: return@forEach
+            response.data.forEach { user ->
+                val login = normalizeChannel(user.login)
+                if (login.isNotBlank()) users[login] = user
+            }
+        }
+        return users
+    }
+
+    private suspend fun fetchStreams(channels: List<String>): Map<String, TwitchStream>? {
+        val normalized = channels
+            .map { normalizeChannel(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (normalized.isEmpty()) return emptyMap()
+
+        val streams = mutableMapOf<String, TwitchStream>()
+        normalized.chunked(100).forEach { chunk ->
+            val response = twitchGet<TwitchStreamsResponse>(
+                buildHelixUrl(
+                    "streams",
+                    repeatedKey = "user_login",
+                    repeatedValues = chunk,
+                    extra = mapOf("first" to "100", "type" to "live"),
+                ),
+            ) ?: return null
+            response.data.forEach { stream ->
+                val login = normalizeChannel(stream.user_login)
+                if (login.isNotBlank()) streams[login] = stream
+            }
+        }
+        return streams
+    }
+
+    private suspend fun fetchLiveFavoriteChannels(favorites: List<String>): List<FavoriteChannel>? {
+        val normalized = favorites
+            .map { normalizeChannel(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+        if (normalized.isEmpty()) return emptyList()
+
+        val now = System.currentTimeMillis()
+        val cacheKey = normalized.joinToString("|")
+        if (cacheKey == cachedLiveKey && now < cachedLiveExpiresAtMs) {
+            return cachedLiveFavorites
+        }
+
+        val streams = fetchStreams(normalized) ?: return null
+        if (streams.isEmpty()) {
+            cachedLiveKey = cacheKey
+            cachedLiveExpiresAtMs = now + liveCacheTtlMs
+            cachedLiveFavorites = emptyList()
+            return emptyList()
+        }
+
+        val users = fetchUsers(streams.keys.toList())
+        val liveChannels = streams.values
+            .map { stream ->
+                val login = normalizeChannel(stream.user_login)
+                favoriteFromApi(login, users[login], stream)
+            }
+            .sortedWith(compareByDescending<FavoriteChannel> { it.viewerCount ?: 0 }.thenBy { it.displayName.lowercase() })
+
+        cachedLiveKey = cacheKey
+        cachedLiveExpiresAtMs = now + liveCacheTtlMs
+        cachedLiveFavorites = liveChannels
+        return liveChannels
     }
 
     private suspend fun fetchChannel(channel: String): FavoriteChannel? {
         val normalized = normalizeChannel(channel)
         if (normalized.isBlank()) return null
+        if (!hasTwitchCredentials()) return fallbackChannel(normalized)
 
-        return runCatching {
-            val doc = app.get("$mainUrl/$normalized", referer = mainUrl).document
-            val displayName = doc.select("div#app-title").text().ifBlank { normalized }
-            if (displayName.isBlank()) return@runCatching null
+        val users = fetchUsers(listOf(normalized))
+        val user = users[normalized] ?: return null
+        val stream = fetchStreams(listOf(normalized))?.get(normalized)
+        return favoriteFromApi(normalized, user, stream)
+    }
 
-            val image = doc.select("div#app-logo > img").attr("src").ifBlank { null }
-            val poster = doc.select("div.embed-responsive > img").attr("src").ifBlank { image }
-            val description = doc.select("div[style='word-wrap:break-word;font-size:12px;']").text().ifBlank { null }
-            val language = doc.select("a.label.label-soft").text().ifBlank { null }
-            val rank = doc.select("div.rank-badge > span").last()?.text()?.toIntOrNull()
-            FavoriteChannel(
-                channel = normalized,
-                displayName = displayName,
-                image = image,
-                poster = poster,
-                isLive = doc.select("div.live-indicator-container").isNotEmpty(),
-                language = language,
-                rank = rank,
-                description = description,
-            )
-        }.getOrNull()
+    private fun favoriteFromApi(channel: String, user: TwitchUser?, stream: TwitchStream?): FavoriteChannel {
+        val normalized = normalizeChannel(channel.ifBlank { user?.login.orEmpty() }.ifBlank { stream?.user_login.orEmpty() })
+        val displayName = listOf(
+            user?.display_name,
+            stream?.user_name,
+            normalized,
+        ).firstOrNull { !it.isNullOrBlank() }.orEmpty()
+        val preview = resizeTwitchImage(stream?.thumbnail_url, 640, 360)
+        val profile = user?.profile_image_url?.ifBlank { null }
+        val offline = user?.offline_image_url?.ifBlank { null }
+        return FavoriteChannel(
+            channel = normalized,
+            displayName = displayName.ifBlank { normalized },
+            image = profile ?: preview,
+            poster = preview ?: offline ?: profile,
+            isLive = stream != null,
+            language = stream?.language?.ifBlank { null },
+            rank = null,
+            description = stream?.title?.ifBlank { null } ?: user?.description?.ifBlank { null },
+            gameName = stream?.game_name?.ifBlank { null },
+            viewerCount = stream?.viewer_count,
+        )
     }
 
     private fun fallbackChannel(channel: String): FavoriteChannel {
@@ -249,6 +492,13 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             rank = null,
             description = null,
         )
+    }
+
+    private fun resizeTwitchImage(url: String?, width: Int, height: Int): String? {
+        return url
+            ?.ifBlank { null }
+            ?.replace("{width}", width.toString())
+            ?.replace("{height}", height.toString())
     }
 
     private fun normalizeChannel(value: String): String {
@@ -275,12 +525,13 @@ class TwitchLiveFavoritesProvider : MainAPI() {
 
         return newLiveSearchResponse(displayTitle, channel, TvType.Live, fix = false) {
             posterUrl = image
-            lang = language
+            lang = language ?: gameName
         }
     }
 
     private fun ChannelSummary.toChannelCard(): LiveSearchResponse {
-        return newLiveSearchResponse(displayName, channel, TvType.Live, fix = false) {
+        val displayTitle = if (isLive) "[LIVE] $displayName" else displayName
+        return newLiveSearchResponse(displayTitle, channel, TvType.Live, fix = false) {
             posterUrl = image
             lang = language
         }
@@ -289,7 +540,7 @@ class TwitchLiveFavoritesProvider : MainAPI() {
     private fun ChannelSummary.toAddCard(label: String = "Add $displayName to Live Favorites"): LiveSearchResponse {
         return newLiveSearchResponse("[Add] $label", "$addPrefix$channel", TvType.Live, fix = false) {
             posterUrl = image
-            lang = "Live Favorites"
+            lang = if (isLive) "Live Favorites - Live" else "Live Favorites"
         }
     }
 
@@ -315,63 +566,19 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         }
     }
 
-    private fun emptyFavoritesCard(): LiveSearchResponse {
-        return newLiveSearchResponse(
-            "No Live Favorites yet - search a streamer to add one",
-            "${noopPrefix}no-favorites",
-            TvType.Live,
-            fix = false,
-        ) {
-            lang = "Live Favorites"
+    private fun statusCard(title: String, code: String): LiveSearchResponse {
+        return newLiveSearchResponse(title, "$statusPrefix$code", TvType.Live, fix = false) {
+            lang = "Status"
         }
     }
 
-    private fun emptyLiveFavoritesCard(hasNoFavorites: Boolean): LiveSearchResponse {
-        val title = if (hasNoFavorites) {
-            "No Live Favorites yet - search a streamer to add one"
-        } else {
-            "No saved favorites are live right now"
-        }
-        val reason = if (hasNoFavorites) "no-favorites" else "none-live"
-        return newLiveSearchResponse(title, "${noopPrefix}$reason", TvType.Live, fix = false) {
-            lang = "Live Favorites"
-        }
+    private fun setupRequiredCard(): LiveSearchResponse {
+        return statusCard("Twitch API setup needed - add GitHub Actions secrets", "setup")
     }
 
-    private fun Element.toChannelSummary(): ChannelSummary? {
-        val link = this.select("a[href]")
-            .firstOrNull { normalizeChannel(it.attr("href")).isNotBlank() }
-            ?: return null
-        val channel = normalizeChannel(link.attr("href"))
-        if (channel.isBlank()) return null
-
-        val displayName = this.select("a")
-            .firstOrNull { it.text().isNotBlank() }
-            ?.text()
-            ?.ifBlank { null }
-            ?: channel
-        val image = this.select("img").attr("src").ifBlank { null }
-        val language = this.select("a.label.label-soft").text().ifBlank { null }
-        return ChannelSummary(channel, displayName, image, language)
-    }
-
-    private suspend fun parseGames(): List<HomePageList> {
-        val doc = app.get("$mainUrl/games").document
-        return doc.select("div.ranked-item")
-            .take(5)
-            .mapNotNull { element ->
-                val game = element.select("div.ri-name > a")
-                val url = fixUrl(game.attr("href"))
-                val name = game.text()
-                val searchResponses = parseGame(url).ifEmpty { return@mapNotNull null }
-                HomePageList(name, searchResponses, isHorizontalImages = isHorizontal)
-            }
-    }
-
-    private suspend fun parseGame(url: String): List<LiveSearchResponse> {
-        val doc = app.get(url).document
-        return doc.select("td.cell-slot.sm")
-            .mapNotNull { element -> element.toChannelSummary()?.toChannelCard() }
+    private fun apiErrorCard(message: String): LiveSearchResponse {
+        val safe = if (message.isBlank()) "Twitch API request failed" else message
+        return statusCard("Twitch API error - open for details", "api-error/${encode(safe)}")
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -379,7 +586,7 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         return when (action?.first) {
             "add" -> addFavoriteResponse(action.second)
             "remove" -> removeFavoriteResponse(action.second)
-            "noop", "help" -> throw RuntimeException(noopMessage(action.second))
+            "status" -> statusResponse(action.second)
             else -> channelLoadResponse(url)
         }
     }
@@ -391,24 +598,66 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             .trim()
             .trimEnd('/')
 
-        val actionPath = when {
-            cleanUrl.startsWith(actionBase) -> cleanUrl.removePrefix(actionBase).trimStart('/')
-            cleanUrl.contains("/$actionMarker/") -> cleanUrl.substringAfter("/$actionMarker/")
-            cleanUrl.startsWith("$actionMarker/") -> cleanUrl.removePrefix("$actionMarker/")
-            cleanUrl == actionMarker -> return null
-            else -> return null
+        fun pathFor(marker: String): String? {
+            val markerBase = "$mainUrl/$marker"
+            return when {
+                cleanUrl.startsWith(markerBase) -> cleanUrl.removePrefix(markerBase).trimStart('/')
+                cleanUrl.contains("/$marker/") -> cleanUrl.substringAfter("/$marker/")
+                cleanUrl.startsWith("$marker/") -> cleanUrl.removePrefix("$marker/")
+                cleanUrl == marker -> "status/setup"
+                else -> null
+            }
         }
 
-        val action = actionPath.substringBefore('/').ifBlank { return null }
+        val actionPath = pathFor(actionMarker) ?: pathFor(legacyActionMarker) ?: return null
+        val rawAction = actionPath.substringBefore('/').ifBlank { "status" }
         val value = actionPath.substringAfter('/', "")
+
+        // Important: old builds used noop/help URLs. Never let those fall through
+        // to channelLoadResponse, because that is what caused Retry Connection pages.
+        val action = when (rawAction) {
+            "add", "remove", "status" -> rawAction
+            "noop", "help", "live" -> "status"
+            else -> "status"
+        }
         return action to value
     }
 
-    private fun noopMessage(reason: String): String {
-        return if (reason == "no-favorites") {
-            "No Live Favorites yet. Search a streamer to add one. Existing normal Twitch favorites are imported automatically."
-        } else {
-            "No saved/imported Twitch favorites are live right now. Refresh later to check again."
+    private suspend fun statusResponse(code: String): LoadResponse {
+        val title: String
+        val message: String
+        val tags: List<String>
+        when {
+            code.startsWith("api-error/") -> {
+                title = "Twitch API error"
+                message = decode(code.substringAfter("api-error/", "Twitch API request failed"))
+                tags = listOf("Status", "API")
+            }
+            code == "setup" -> {
+                title = "Twitch API setup needed"
+                message = "This v3.1 build did not receive Twitch API credentials. Add TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to GitHub Actions secrets and rebuild. The workflow should fail if either secret is missing."
+                tags = listOf("Setup", "Twitch API")
+            }
+            code == "no-favorites" -> {
+                title = "No Live Favorites yet"
+                message = "Search for a streamer in this provider and open the [Add] card. Existing normal Twitch-plugin favorites are also imported automatically once Twitch API credentials are configured."
+                tags = listOf("Status")
+            }
+            code == "channel-not-found" -> {
+                title = "Channel not found"
+                message = "Twitch did not return a matching channel for that name. Try searching again with the exact Twitch login."
+                tags = listOf("Status")
+            }
+            else -> {
+                title = "No saved favorites are live right now"
+                message = "API v3.1 is active. Your saved/imported Twitch favorites are checked with Twitch Helix, not TwitchTracker. Offline streamers stay hidden until they go live. Use the top refresh button to check again."
+                tags = listOf("Status")
+            }
+        }
+
+        return newLiveStreamLoadResponse(title, "$statusPrefix$code", twitchUrl("twitch")) {
+            plot = message
+            this@newLiveStreamLoadResponse.tags = tags
         }
     }
 
@@ -422,7 +671,7 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             "${info.displayName} is already saved"
         }
         val message = if (changed) {
-            "${info.displayName} was added to Live Favorites. Return to the Twitch Live Favorites home page. They will only appear in Live Now while they are actually live."
+            "${info.displayName} was added to Live Favorites. They will only appear in Live Now while they are actually live."
         } else {
             "${info.displayName} is already in your Live Favorites list."
         }
@@ -451,14 +700,14 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         val message = if (changed) {
             "${info.displayName} was removed from Live Favorites."
         } else {
-            "${info.displayName} was not in your Live Favorites list."
+            "${info.displayName} was not in your Live Favorites list, or it comes from the normal Twitch plugin's favorites."
         }
 
         return newLiveStreamLoadResponse(title, twitchUrl(info.channel), twitchUrl(info.channel)) {
             plot = message
             posterUrl = info.image
             backgroundPosterUrl = info.poster
-            tags = listOf(if (info.isLive) "Live" else "Offline", "Not saved")
+            tags = listOf(if (info.isLive) "Live" else "Offline", if (changed) "Removed" else "Not saved here")
             recommendations = listOf(
                 info.toChannelCard(showOfflineLabel = true),
                 info.toAddCard(),
@@ -468,12 +717,13 @@ class TwitchLiveFavoritesProvider : MainAPI() {
 
     private suspend fun channelLoadResponse(url: String): LoadResponse {
         val channel = normalizeChannel(url)
-        val info = fetchChannel(channel) ?: throw RuntimeException("Could not load page, please try again.\n")
-        val tags = listOfNotNull(
+        val info = fetchChannel(channel) ?: return statusResponse("channel-not-found")
+        val tagList = listOfNotNull(
             if (info.isLive) "Live" else "Offline",
             if (isFavorite(info.channel)) "Live Favorite" else null,
+            info.gameName,
             info.language,
-            info.rank?.let { "Rank: $it" },
+            info.viewerCount?.let { "$it viewers" },
         )
         val action = if (isPluginSavedFavorite(info.channel)) {
             info.toRemoveCard()
@@ -486,9 +736,34 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             plot = info.description
             posterUrl = info.image
             backgroundPosterUrl = info.poster
-            this@newLiveStreamLoadResponse.tags = tags
+            this@newLiveStreamLoadResponse.tags = tagList
             recommendations = listOf(action)
         }
+    }
+
+    private suspend fun searchChannels(query: String): List<ChannelSummary> {
+        if (!hasTwitchCredentials()) return emptyList()
+        val response = twitchGet<TwitchSearchResponse>(
+            buildHelixUrl(
+                "search/channels",
+                extra = mapOf("query" to query, "first" to "20", "live_only" to "false"),
+            ),
+        ) ?: return emptyList()
+
+        return response.data
+            .mapNotNull { item ->
+                val channel = normalizeChannel(item.broadcaster_login)
+                if (channel.isBlank()) return@mapNotNull null
+                ChannelSummary(
+                    channel = channel,
+                    displayName = item.display_name.ifBlank { channel },
+                    image = item.thumbnail_url.ifBlank { null },
+                    language = item.broadcaster_language.ifBlank { null },
+                    isLive = item.is_live,
+                    title = item.title.ifBlank { null },
+                )
+            }
+            .distinctBy { it.channel }
     }
 
     override suspend fun search(query: String): List<SearchResponse>? {
@@ -503,13 +778,11 @@ class TwitchLiveFavoritesProvider : MainAPI() {
             emptyList()
         }
 
-        val results = runCatching {
-            val document = app.get("$mainUrl/search", params = mapOf("q" to query), referer = mainUrl).document
-            document.select("table.tops tr")
-                .mapNotNull { it.toChannelSummary() }
-                .distinctBy { it.channel }
-        }.getOrElse { emptyList() }
+        if (!hasTwitchCredentials()) {
+            return (exactAction + setupRequiredCard()).distinctBy { it.url }
+        }
 
+        val results = searchChannels(query)
         val addActions = results
             .filterNot { isPluginSavedFavorite(it.channel) }
             .take(8)
@@ -518,16 +791,17 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         val removeActions = results
             .filter { isPluginSavedFavorite(it.channel) }
             .take(8)
-            .map { fallbackChannel(it.channel).copy(displayName = it.displayName, image = it.image, language = it.language).toRemoveCard("Remove ${it.displayName} from Live Favorites") }
+            .map { fallbackChannel(it.channel).copy(displayName = it.displayName, image = it.image, language = it.language, isLive = it.isLive).toRemoveCard("Remove ${it.displayName} from Live Favorites") }
 
-        return (exactAction + removeActions + addActions + results.map { it.toChannelCard() })
+        val fallbackStatus = if (results.isEmpty() && lastTwitchApiError != null) {
+            listOf(apiErrorCard(lastTwitchApiError.orEmpty()))
+        } else {
+            emptyList()
+        }
+
+        return (exactAction + removeActions + addActions + results.map { it.toChannelCard() } + fallbackStatus)
             .distinctBy { it.url }
     }
-
-    data class ApiResponse(
-        val success: Boolean,
-        val urls: Map<String, String>?,
-    )
 
     override suspend fun loadLinks(
         data: String,
