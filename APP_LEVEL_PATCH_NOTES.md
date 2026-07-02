@@ -15,3 +15,13 @@ Those changes require modifying the CloudStream app, not only shipping a normal 
 ## v2.2 note
 
 The provider-owned favorites list uses CloudStream DataStore helpers instead of SharedPreferences via ContextHelper. This avoids the Android TV runtime crash caused by `ContextHelper_jvmKt` not being available in the app runtime.
+
+
+## v2.3 note
+
+Internal action cards now use normal HTTPS marker URLs to avoid Android TV/CloudStream route normalization of custom schemes.
+
+
+## v2.5 behavior
+
+The plugin now does a best-effort read of CloudStream's local Favorites list via internal DataStoreHelper APIs and includes entries from the normal Twitch provider in the custom `Live Now` row. This is read-only and does not mutate CloudStream's existing favorites.
