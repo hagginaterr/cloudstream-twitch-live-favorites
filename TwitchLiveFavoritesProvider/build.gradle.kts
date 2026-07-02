@@ -1,8 +1,8 @@
 // Use an integer for version numbers
-version = 11
+version = 30
 
 cloudstream {
-    description = "Twitch Live Favorites: stable v2.5 behavior with a safer no-op empty card instead of the removed Help screen."
+    description = "Twitch Live Favorites v3: Live Now via Twitch Helix API, existing favorites import, and original pwn.sh playback."
     authors = listOf("CranberrySoup", "Custom live-favorites patch")
 
     /**
