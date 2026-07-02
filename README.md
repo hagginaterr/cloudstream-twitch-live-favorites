@@ -1,6 +1,11 @@
-# Twitch Live Favorites v2 for CloudStream
+# Twitch Live Favorites v2.2 for CloudStream
 
 This is a separate CloudStream provider named **Twitch Live Favorites**. It is designed to coexist with the normal Twitch provider.
+
+
+## v2.2 runtime fix
+
+v2.2 removes the direct `com.lagradost.api.getContext()` call that caused `Failed resolution of: Lcom/lagradost/api/ContextHelper_jvmKt` on Android TV. Favorites are now saved through CloudStream's own `CloudStreamApp.getKey` / `setKey` helpers.
 
 ## What v2 adds
 
@@ -75,3 +80,8 @@ Copy the built `.cs3` file to:
 ```
 
 Then fully close and reopen CloudStream. If CloudStream cannot see local plugin files, grant it All Files Access in Android settings.
+
+
+## v2.1 fix
+
+This build no longer registers a global Twitch extractor, so it should not interfere with the normal Twitch plugin or older CloudStream favorites. Search now always shows an exact `[Add]` card even if TwitchTracker search fails.
