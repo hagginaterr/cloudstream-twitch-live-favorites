@@ -1,8 +1,8 @@
 // Use an integer for version numbers
-version = 2
+version = 4
 
 cloudstream {
-    description = "Separate Twitch provider with a plugin-owned live favorites list, search-to-add, live-only, live-first, and remove actions"
+    description = "Separate Twitch provider with plugin-owned live favorites. v2.2 fixes local storage runtime crash by using CloudStream DataStore helpers."
     authors = listOf("CranberrySoup", "Custom live-favorites patch")
 
     /**
