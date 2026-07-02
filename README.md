@@ -1,4 +1,4 @@
-# Twitch Live Favorites v2.7 for CloudStream
+# Twitch Live Favorites v2.9 for CloudStream
 
 This is a separate CloudStream provider named **Twitch Live Favorites**. It is designed to coexist with the normal Twitch provider.
 
@@ -10,7 +10,7 @@ This is a separate CloudStream provider named **Twitch Live Favorites**. It is d
 - One home row only: `Live Now`
 - `Live Now` only shows saved/imported favorite streamers while they are currently live
 - Best-effort home/library refresh request after plugin Add/Remove actions
-- Experimental direct-play cards in `Live Now`, so a first click should start playback on most builds
+- Stable normal cards in `Live Now` so the row renders properly on Android TV
 - Offline saved favorites remain saved but stay hidden from `Live Now` until they go live
 - To remove a saved streamer, search/open that streamer and use the `[Remove]` card
 
@@ -31,7 +31,7 @@ Because CloudStream provider cards cannot create true custom buttons, add/remove
 
 After plugin Add/Remove actions, v2.7 asks CloudStream to refresh the home/library UI. That is a best-effort internal refresh request, not a real background timer. If you add/remove a favorite through the normal Twitch plugin instead of this custom plugin, you may still need to refresh or reload the `Twitch Live Favorites` home page.
 
-The `Live Now` row uses experimental direct-play cards. On CloudStream builds that support the internal Resume Watching click path, clicking a live streamer should start playback immediately. If your build still opens the detail page, that part requires an app-side CloudStream change.
+`Live Now` uses normal CloudStream provider cards for stability. Clicking a streamer opens its stream page; one-click autoplay would require an app-side CloudStream UI change or a safer CloudStream-supported card type.
 
 ## Recent fixes
 
@@ -39,7 +39,8 @@ The `Live Now` row uses experimental direct-play cards. On CloudStream builds th
 - v2.2 replaced `getContext()` storage with CloudStream `getKey` / `setKey` storage to avoid Android TV runtime crashes.
 - v2.3 changed internal add/remove URLs to normal HTTPS action URLs so Android TV passes them back to the provider correctly.
 - v2.5 imported existing normal Twitch CloudStream favorites into `Live Now` in read-only mode.
-- v2.7 requests a UI refresh after Add/Remove and makes `Live Now` cards direct-play on supported CloudStream builds.
+- v2.7 attempted experimental direct-play cards.
+- v2.9 reverts Live Now to normal provider cards because direct-play cards rendered as an empty/black row on some Android TV builds.
 
 ## Build with GitHub Actions
 
@@ -87,16 +88,25 @@ Copy the built `.cs3` file to:
 Then fully close and reopen CloudStream. If CloudStream cannot see local plugin files, grant it All Files Access in Android settings.
 
 
-## v2.7 note: existing CloudStream Twitch favorites
+## v2.9 note: existing CloudStream Twitch favorites
 
 This build reads CloudStream's existing local Favorites list in read-only mode and automatically includes entries from the normal `Twitch` provider in the `Live Now` row. It does not modify or delete CloudStream's normal favorites. The visible `Live Now` row still only shows saved/imported streamers while they are currently live.
 
 The `[Remove]` card only removes streamers saved directly by this custom plugin. If a streamer is still in CloudStream's normal Twitch favorites, remove it from the normal CloudStream Favorites/Library as well if you do not want it to appear in `Live Now`.
 
 
-## v2.7 update
+## v2.9 update
 
-- Removes the clickable Help/empty-state card completely.
-- The Home page now only shows the `Live Now` row with live saved streamers.
-- If nobody is live, the row is empty instead of opening a confusing Help page.
-- Keeps v2.6's best-effort refresh event after Add/Remove and experimental direct-play Live Now cards.
+- The Home page still has only the `Live Now` row.
+- If nobody is live, it shows a safe empty-state card instead of a blank black page or Help page.
+- Reverts the experimental direct-play card type, which caused empty/black rows on some Android TV builds.
+- Keeps best-effort refresh events after Add/Remove.
+
+
+## v2.9 code-sweep changes
+
+- Keeps the stable single `Live Now` row.
+- Keeps offline saved favorites hidden from the home row.
+- Improves Twitch/TwitchTracker URL normalization for imported CloudStream favorites.
+- Removes unused homepage branches from the custom provider.
+- Bumps the plugin version to 9 so CloudStream recognizes the update over v2.8.
