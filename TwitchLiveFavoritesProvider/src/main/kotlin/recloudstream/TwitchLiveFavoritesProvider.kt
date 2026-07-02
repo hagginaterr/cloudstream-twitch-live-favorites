@@ -419,7 +419,7 @@ class TwitchLiveFavoritesProvider : MainAPI() {
         return action to value
     }
 
-    private fun noLiveFavoritesResponse(reason: String): LoadResponse {
+    private suspend fun noLiveFavoritesResponse(reason: String): LoadResponse {
         val hasNoFavorites = reason == "no-favorites"
         val title = if (hasNoFavorites) "No favorites saved yet" else "No favorites are live right now"
         val message = if (hasNoFavorites) {
