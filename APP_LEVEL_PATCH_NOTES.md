@@ -1,17 +1,26 @@
-# Twitch Live Favorites API v3.1
+# v3.3 Patch Notes
 
-This build is intentionally a clean break from the older TwitchTracker-based test builds.
+Built from the stable v3.2 API provider.
 
-## Changes
+## Added
 
-- Provider is now named **Twitch Live Favorites API** so it is visibly distinct from stale older builds.
-- Uses Twitch Helix for Live Now checks.
-- Keeps the same pwn.sh / Streamlink playback route from v2.5.
-- Uses a new internal action marker: `__twitch_live_favorites_api_v31_action__`.
-- Recognizes and neutralizes legacy `__twitch_live_favorites_action__` URLs, including old `noop`/`help` cards, so stale cards should not fall through into a fake channel load.
-- Home page no longer uses a clickable no-live placeholder card. If no favorites are live, the Live Now row is empty rather than clickable.
-- GitHub Actions now fails the build if Twitch credentials are missing.
+- Conservative 429 / Too Many Requests backoff.
+- Last-known-good in-memory cache fallback for Live Now if Twitch API fails after a successful check.
+- Last updated label in the Live Now row title.
+- Viewer-count sorting for Live Now.
+- Category + compact viewer count subtitles.
 
-## Install notes
+## Changed
 
-Remove every old local `.cs3` that contains Twitch/Live/Favorites before pushing this one. Then select **Twitch Live Favorites API** as the source, not the older **Twitch Live Favorites** entry.
+- Live Now cards no longer add `[LIVE]` to titles.
+- Detail tags no longer include redundant `Live` or `Live Favorite` chips.
+- Live Now cards prefer stream preview thumbnails when available.
+
+## Unchanged
+
+- Built-in CloudStream favorites only.
+- No TwitchTracker calls.
+- No custom Add/Remove cards.
+- Original pwn.sh / Streamlink playback route.
+- No direct-play experiment.
+- No auto-refresh timer.
