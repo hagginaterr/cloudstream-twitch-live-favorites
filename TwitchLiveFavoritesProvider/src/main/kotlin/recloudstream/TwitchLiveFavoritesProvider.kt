@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LiveSearchResponse
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
@@ -34,9 +35,11 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
     private val liveFavoritesNowName = "Live Now"
     private val isHorizontal = true
 
-    private val actionMarker = "__twitch_live_favorites_api_v33_action__"
-    private val legacyApiActionMarker = "__twitch_live_favorites_api_v32_action__"
-    private val olderApiActionMarker = "__twitch_live_favorites_api_v31_action__"
+    private val actionMarker = "__twitch_live_favorites_api_v35_action__"
+    private val legacyApiActionMarker = "__twitch_live_favorites_api_v34_action__"
+    private val legacyApiActionMarkerV33 = "__twitch_live_favorites_api_v33_action__"
+    private val olderApiActionMarker = "__twitch_live_favorites_api_v32_action__"
+    private val oldestApiActionMarker = "__twitch_live_favorites_api_v31_action__"
     private val legacyActionMarker = "__twitch_live_favorites_action__"
     private val actionBase = "$mainUrl/$actionMarker"
     private val statusPrefix = "$actionBase/status/"
@@ -44,7 +47,9 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
 
     private val helixBase = "https://api.twitch.tv/helix"
     private val oauthTokenUrl = "https://id.twitch.tv/oauth2/token"
-    private val liveCacheTtlMs = 2 * 60 * 1000L
+    private val liveCacheTtlMs = 5 * 60 * 1000L
+    private val autoRefreshIntervalMs = 5 * 60 * 1000L
+    private val failedApiRetryDelayMs = 60 * 1000L
 
     private var cachedAccessToken: String? = null
     private var cachedAccessTokenExpiresAtMs: Long = 0L
@@ -54,6 +59,9 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
     private var cachedLiveUpdatedAtMs: Long = 0L
     private var rateLimitedUntilMs: Long = 0L
     private var lastTwitchApiError: String? = null
+    @Volatile private var lastHomeRenderedAtMs: Long = 0L
+    @Volatile private var autoRefreshScheduledAtMs: Long = 0L
+    @Volatile private var autoRefreshScheduledForKey: String = ""
 
     override val mainPage = mainPageOf(
         "$actionBase/live" to liveFavoritesNowName,
@@ -66,6 +74,7 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
             favorites.isEmpty() -> emptyList()
             else -> {
                 val liveFavorites = fetchLiveFavoriteChannels(favorites)
+                maybeScheduleAutoRefresh(favoritesCacheKey(favorites))
                 when {
                     liveFavorites == null -> listOf(apiErrorCard(lastTwitchApiError.orEmpty()))
                     liveFavorites.isNotEmpty() -> liveFavorites.map { it.toChannelCard(showOfflineLabel = false) }
@@ -183,7 +192,7 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
                     val url = favorite.url.lowercase()
                     val api = favorite.apiName.lowercase()
                     (api == "twitch" || api == name.lowercase() || url.contains("twitch") || url.contains("twitchtracker")) &&
-                        !url.contains(actionMarker) && !url.contains(legacyApiActionMarker) && !url.contains(olderApiActionMarker) && !url.contains(legacyActionMarker)
+                        !url.contains(actionMarker) && !url.contains(legacyApiActionMarker) && !url.contains(legacyApiActionMarkerV33) && !url.contains(olderApiActionMarker) && !url.contains(oldestApiActionMarker) && !url.contains(legacyActionMarker)
                 }
                 .mapNotNull { favorite ->
                     val fromUrl = normalizeChannel(favorite.url)
@@ -201,7 +210,7 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
     }
 
     /**
-     * v3.2 reads CloudStream's built-in favorites only. That keeps the custom provider
+     * v3.5 reads CloudStream's built-in favorites only. That keeps the custom provider
      * simple: search/open a streamer, use CloudStream's normal favorite button, and Live Now
      * imports those favorites automatically. Offline channels are still hidden by getMainPage().
      */
@@ -244,19 +253,73 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
         lastTwitchApiError = "Twitch API rate limit reached.$suffix"
     }
 
-    private fun updatedAgoText(): String? {
-        if (cachedLiveUpdatedAtMs <= 0L) return null
-        val ageSeconds = ((nowMs() - cachedLiveUpdatedAtMs) / 1000L).coerceAtLeast(0L)
-        return when {
-            ageSeconds < 5L -> "updated just now"
-            ageSeconds < 60L -> "updated ${ageSeconds}s ago"
-            ageSeconds < 3600L -> "updated ${ageSeconds / 60L}m ago"
-            else -> "updated ${ageSeconds / 3600L}h ago"
+    private fun favoritesCacheKey(favorites: List<String>): String {
+        return favorites
+            .map { normalizeChannel(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+            .joinToString("|")
+    }
+
+    /**
+     * Keep refresh conservative: UI refreshes are allowed to re-render the row,
+     * but they do not invalidate the Twitch API cache. A Twitch API call only
+     * happens when the normal cache TTL has expired, the favorites set changed,
+     * or there is no last-known-good result yet.
+     */
+
+    /**
+     * Best-effort request for CloudStream to reload the visible home provider.
+     * These are CloudStream internals, so every call is deliberately guarded.
+     */
+    private fun requestUiRefresh() {
+        runCatching { MainActivity.reloadHomeEvent(true) }
+    }
+
+    /**
+     * API-safe auto-refresh: schedule one delayed UI reload after the row renders.
+     * The timer does not call Twitch directly and does not force-expire cache.
+     * That caps Live Now checks to roughly one Helix stream request per cache TTL
+     * while this provider keeps being re-rendered.
+     */
+    private fun maybeScheduleAutoRefresh(cacheKey: String) {
+        if (cacheKey.isBlank()) return
+        val now = nowMs()
+        lastHomeRenderedAtMs = now
+
+        val existingScheduleStillPending =
+            autoRefreshScheduledForKey == cacheKey && now < autoRefreshScheduledAtMs + autoRefreshIntervalMs
+        if (existingScheduleStillPending) return
+
+        autoRefreshScheduledForKey = cacheKey
+        autoRefreshScheduledAtMs = now
+
+        Thread {
+            runCatching { Thread.sleep(autoRefreshIntervalMs) }
+            val elapsedSinceRender = nowMs() - lastHomeRenderedAtMs
+            val providerWasRecentlyRendered = elapsedSinceRender <= autoRefreshIntervalMs + 60_000L
+            if (autoRefreshScheduledForKey == cacheKey && providerWasRecentlyRendered && !isBackoffActive()) {
+                requestUiRefresh()
+            }
+        }.apply {
+            name = "TwitchLiveFavoritesAutoRefresh"
+            isDaemon = true
+            start()
         }
     }
 
+    private fun updatedAtText(): String? {
+        if (cachedLiveUpdatedAtMs <= 0L) return null
+        val formatted = runCatching {
+            java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
+                .format(java.util.Date(cachedLiveUpdatedAtMs))
+        }.getOrDefault(null) ?: return null
+        return "last checked $formatted"
+    }
+
     private fun liveFavoritesRowTitle(): String {
-        return updatedAgoText()?.let { "$liveFavoritesNowName • $it" } ?: liveFavoritesNowName
+        return updatedAtText()?.let { "$liveFavoritesNowName • $it" } ?: liveFavoritesNowName
     }
 
     private suspend fun getAppAccessToken(): String? {
@@ -434,7 +497,9 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
         if (streams == null) {
             // Last-known-good fallback: if Twitch is temporarily unavailable or rate-limited,
             // keep showing the most recent result for the same favorites set instead of an error.
+            // Also wait briefly before retrying so repeated UI reloads cannot hammer Helix.
             if (cacheKey == cachedLiveKey && cachedLiveUpdatedAtMs > 0L) {
+                cachedLiveExpiresAtMs = now + failedApiRetryDelayMs
                 return cachedLiveFavorites
             }
             return null
@@ -465,6 +530,14 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
     private suspend fun fetchChannel(channel: String): FavoriteChannel? {
         val normalized = normalizeChannel(channel)
         if (normalized.isBlank()) return null
+
+        // If this was opened from the Live Now row, reuse the already-fetched
+        // stream metadata instead of spending extra Helix calls just to build
+        // the detail page. Search results for non-favorites can still fetch.
+        cachedLiveFavorites.firstOrNull { it.channel == normalized }?.let { cached ->
+            return cached
+        }
+
         if (!hasTwitchCredentials()) return fallbackChannel(normalized)
 
         val users = fetchUsers(listOf(normalized))
@@ -614,7 +687,7 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
             }
         }
 
-        val actionPath = pathFor(actionMarker) ?: pathFor(legacyApiActionMarker) ?: pathFor(olderApiActionMarker) ?: pathFor(legacyActionMarker) ?: return null
+        val actionPath = pathFor(actionMarker) ?: pathFor(legacyApiActionMarker) ?: pathFor(legacyApiActionMarkerV33) ?: pathFor(olderApiActionMarker) ?: pathFor(oldestApiActionMarker) ?: pathFor(legacyActionMarker) ?: return null
         val rawAction = actionPath.substringBefore('/').ifBlank { "status" }
         val value = actionPath.substringAfter('/', "")
 
@@ -640,7 +713,7 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
             }
             code == "setup" -> {
                 title = "Twitch API setup needed"
-                message = "This v3.3 build did not receive Twitch API credentials. Add TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to GitHub Actions secrets and rebuild. The workflow should fail if either secret is missing."
+                message = "This v3.5 build did not receive Twitch API credentials. Add TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to GitHub Actions secrets and rebuild. The workflow should fail if either secret is missing."
                 tags = listOf("Setup", "Twitch API")
             }
             code == "no-favorites" -> {
@@ -655,12 +728,12 @@ class TwitchApiLiveFavoritesProvider : MainAPI() {
             }
             code == "built-in-favorites" -> {
                 title = "Use CloudStream Favorites"
-                message = "v3.3 removed the custom Add/Remove cards. Search/open a streamer and use CloudStream's normal favorite button instead. Live Now imports those built-in favorites automatically."
+                message = "v3.5 removed the custom Add/Remove cards. Search/open a streamer and use CloudStream's normal favorite button instead. Live Now imports those built-in favorites automatically."
                 tags = listOf("Status", "Favorites")
             }
             else -> {
                 title = "No saved favorites are live right now"
-                message = "API v3.3 is active. Your saved/imported Twitch favorites are checked with Twitch Helix, not TwitchTracker. Offline streamers stay hidden until they go live. Use the top refresh button to check again."
+                message = "API v3.5 is active. Your saved/imported Twitch favorites are checked with Twitch Helix, not TwitchTracker. Offline streamers stay hidden until they go live. Live Now uses a conservative 5-minute cache and auto-refreshes the UI without forcing extra API calls."
                 tags = listOf("Status")
             }
         }

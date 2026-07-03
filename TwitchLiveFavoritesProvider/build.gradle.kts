@@ -1,8 +1,8 @@
 // Use an integer for version numbers
-version = 33
+version = 35
 
 cloudstream {
-    description = "Twitch Live Favorites API v3.3: Twitch Helix live detection with 429 backoff, last-known-good cache fallback, cleaned Live Now cards, and original pwn.sh playback."
+    description = "Twitch Live Favorites API v3.5: conservative API-safe auto-refresh with 5-minute cache, no forced cache invalidation on navigation, and original pwn.sh playback."
     authors = listOf("CranberrySoup", "Custom live-favorites patch")
 
     /**
